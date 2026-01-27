@@ -26,10 +26,10 @@ USER tws
 WORKDIR /home/tws
 
 # Install IBKR TWS - patch installer to use system java
-RUN mkdir -p ibkr-tws/1031 && \
+RUN mkdir -p ibkr-tws/1043 && \
     curl -sL "https://download2.interactivebrokers.com/installers/tws/latest-standalone/tws-latest-standalone-linux-x64.sh" -o /tmp/tws-installer.sh && \
     sed -i 's|\$INSTALL4J_JAVA_PREFIX "\$app_java_home/bin/java"|java|' /tmp/tws-installer.sh && \
-    echo -e "/home/tws/ibkr-tws/1031\ny\nn" | bash /tmp/tws-installer.sh -- -c && \
+    echo -e "/home/tws/ibkr-tws/1043\ny\nn" | bash /tmp/tws-installer.sh -- -c && \
     rm /tmp/tws-installer.sh
 
 # Install IBC

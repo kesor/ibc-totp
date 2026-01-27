@@ -5,7 +5,7 @@ chmod 755 "${HOME}/jts"
 export IBC_INI="${HOME}/IBC/config.ini"
 export IBC_PATH="${HOME}/IBC"
 export TWS_PATH="${HOME}/ibkr-tws"
-export TWS_VERSION="1031"
+export TWS_VERSION="1043"
 export TWS_SETTINGS_PATH="${HOME}/jts"
 # shellcheck source=tws.secrets
 . "${TWS_CREDS_FILE}"
