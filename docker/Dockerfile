@@ -8,7 +8,6 @@ RUN nix-env -f '<nixpkgs>' -iA \
     javaPackages.openjfx21 \
     curl unzip \
     xorg.xorgserver xorg.xauth xvfb-run x11vnc \
-    xfce.xfce4-session xfce.xfconf xfce.xfdesktop \
     bash coreutils findutils gnused gnugrep util-linux
 
 ENV PATH="/root/.nix-profile/bin:${PATH}"
