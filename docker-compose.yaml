@@ -6,8 +6,6 @@ services:
     container_name: ibkr-tws-prod
     ports:
       - "5901:5900"  # VNC
-      - "4003:4001"  # TWS API (live)
-      - "4004:4002"  # TWS API (paper)
     secrets:
       - tws
     restart: unless-stopped

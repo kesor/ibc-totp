@@ -27,6 +27,4 @@ NixOS-based Docker container for Interactive Brokers TWS with:
 
 ## Ports
 
-- 5901: VNC server (mapped from container 5900)
-- 4003: TWS API (live, mapped from container 4001)
-- 4004: TWS API (paper, mapped from container 4002)
+- 5901: VNC server
