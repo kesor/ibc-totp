@@ -14,6 +14,9 @@ services:
     environment:
       - DISPLAY=:0
       - TZ=Asia/Jerusalem
+      # Xvfb / VNC screen size, WIDTHxHEIGHT.  Override per-run, e.g.:
+      #   VNC_RESOLUTION=1280x800 docker compose up -d
+      - VNC_RESOLUTION=${VNC_RESOLUTION:-1920x1080}
 
 secrets:
   tws:

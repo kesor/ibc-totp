@@ -149,6 +149,13 @@ TWS_TOTP_SECRET=your_base32_totp_secret
 docker compose up -d
 ```
 
+The Xvfb desktop defaults to **1920×1080**. To pick a different size,
+set `VNC_RESOLUTION` (`WIDTHxHEIGHT`):
+
+```bash
+VNC_RESOLUTION=1280x800 docker compose up -d
+```
+
 ### 3. Access
 
 - **VNC**: Connect to `localhost:5901`

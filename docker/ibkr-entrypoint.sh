@@ -2,6 +2,11 @@
 
 export DISPLAY="${DISPLAY:-:0}"
 export TWS_CREDS_FILE="/run/secrets/tws"
+# Xvfb screen geometry, in WIDTHxHEIGHT form (e.g. 1280x800).
+# Override at `docker compose up` time:
+#     VNC_RESOLUTION=1280x800 docker compose up -d
+# Colour depth is fixed at 24 bits internally; nobody cares.
+export VNC_RESOLUTION="${VNC_RESOLUTION:-1920x1080}"
 
 ts=$(date -Iminutes|sed -e's/+.*$//g;s/[:-]//g')
 
@@ -18,7 +23,7 @@ fi
 # Clean up stale X lock files
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
 
-nohup Xvfb "${DISPLAY}" -br -screen 0 2560x1440x24 2>"xvfb-err-${ts}.log" >"xvfb-out-${ts}.log" &
+nohup Xvfb "${DISPLAY}" -br -screen 0 "${VNC_RESOLUTION}x24" 2>"xvfb-err-${ts}.log" >"xvfb-out-${ts}.log" &
 # wait for X server to start
 sleep 15
 # Allow all X connections
