@@ -11,6 +11,13 @@ services:
     restart: unless-stopped
     volumes:
       - tws-data:/home/tws/jts
+      # Host-visible archive of decryption keys (written by the in-container
+      # JVMTI agent) and decrypted plaintext logs. The encrypted .ibgzenc
+      # files themselves stay on the `tws-data` named volume above.
+      # The host directory must be writable by uid 1000 (the `tws` user
+      # inside the container). If your host user has a different uid, see
+      # docs/decryption-keys-volume.md for chown instructions.
+      - ../logs:/home/tws/jts/logs
     environment:
       - DISPLAY=:0
       - TZ=Asia/Jerusalem

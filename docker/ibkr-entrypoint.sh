@@ -21,6 +21,13 @@ cd "${HOME}" || exit 1
 # Ensure jts directory exists and is owned by tws user
 mkdir -p "${HOME}/jts"
 
+# Ensure the decryption-keys archive subdirs exist. The host bind-mount
+# at $HOME/jts/logs may be empty on first `docker compose up`; we create
+# `keys/` and `decrypted/` here so the JVMTI agent has somewhere to
+# write keys. Files written by the in-container `tws` user (uid 1000)
+# will appear in the host dir owned by uid 1000.
+mkdir -p "${HOME}/jts/logs/keys" "${HOME}/jts/logs/decrypted"
+
 # Tidy up after any pre-restart crashes:
 #   - core.* files dropped by chromium/JVM aborts (these lived on the
 #     ephemeral container layer, but `core` files in $HOME will still

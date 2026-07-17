@@ -1,3 +1,7 @@
+# Persistent decryption keys + decrypted logs (bind-mounted into the
+# TWS container; contains sensitive material).
+logs/
+
 # Secrets
 docker/tws.secrets
 

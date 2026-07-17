@@ -37,7 +37,21 @@ RUN nix-env -f '<nixpkgs>' -iA \
       ubuntu-sans \
       ubuntu-sans-mono \
       # chromium 149's text shaping pipeline (HarfBuzz) needs ICU.
-      icu
+      icu \
+      # gcc + binutils are needed to build the JVMTI key-extraction
+      # agent (see scripts/decrypt/agent.c) at image build time.
+      gcc binutils \
+      # X11 client libraries. The `zulu21` Nix wrapper doesn't put
+      # these on LD_LIBRARY_PATH, so AWT's XToolkit fails to dlopen
+      # libX11.so.6 ("No toolkit found"), which blocks JavaFX init
+      # and the embedded HTTP bridge on port 20000 that serves the
+      # advanced chart / tradingview URL. Our java-wrapper.sh
+      # prepends /root/.nix-profile/lib to LD_LIBRARY_PATH at
+      # launch, so installing these here puts the .so files in the
+      # right place.
+      nixpkgs.libX11 nixpkgs.libXext nixpkgs.libXtst \
+      nixpkgs.libXi nixpkgs.libXrender nixpkgs.libXt \
+      nixpkgs.libXdmcp nixpkgs.libXau
 
 ENV PATH="/root/.nix-profile/bin:${PATH}"
 
@@ -125,6 +139,22 @@ COPY ibc-start.sh /ibc-start.sh
 # (it does `[[ ! -e "$java_path/java" ]]` and aborts otherwise). The wrapper \
 # just exec's the system java. \
 COPY --chmod=0755 java-wrapper.sh /home/tws/java
+
+# Build the JVMTI key-extraction agent. The agent attaches to TWS on
+# every startup, polls twslaunch.jclient.login.e for the live AES-128
+# logKey, and writes it to /home/tws/jts/logs/keys/key-<ts>.hex so the
+# host can decrypt .ibgzenc log files without re-running anything.
+# Headers come from the zulu21 package installed above.
+COPY ../scripts/decrypt/agent.c /tmp/agent.c
+RUN mkdir -p /home/tws/.tws-tools && \
+    gcc -O2 -fPIC -shared -o /home/tws/.tws-tools/libagent.so \
+        /tmp/agent.c \
+        -I/root/.nix-profile/include -I/root/.nix-profile/include/linux && \
+    rm -f /tmp/agent.c && \
+    chown root:root /home/tws/.tws-tools/libagent.so && \
+    chmod 0644 /home/tws/.tws-tools/libagent.so && \
+    ls -la /home/tws/.tws-tools/
+
 # Pre-create /home/tws/chromium with the right ownership and perms so a
 # fresh chromium-data named volume (which docker creates as root) gets
 # the right uid/gid the moment TWS's JxBrowser panel starts.
