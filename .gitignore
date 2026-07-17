@@ -21,3 +21,7 @@ ibc-patches/lib
 IBC/resources/IBC.jar
 IBC/target/
 IBC/dist/
+
+# Persistent TWS data dir (bind-mounted into the container). Contains
+# encrypted logs, the keys archive, decrypted logs, and TWS settings.
+jts/

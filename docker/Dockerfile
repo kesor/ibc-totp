@@ -38,9 +38,11 @@ RUN nix-env -f '<nixpkgs>' -iA \
       ubuntu-sans-mono \
       # chromium 149's text shaping pipeline (HarfBuzz) needs ICU.
       icu \
-      # gcc + binutils are needed to build the JVMTI key-extraction
-      # agent (see scripts/decrypt/agent.c) at image build time.
-      gcc binutils \
+      # gcc (which pulls in binutils) is needed to build the JVMTI
+      # key-extraction agent (see scripts/decrypt/agent.c) at image
+      # build time. Don't add binutils separately — its wrappers
+      # conflict with gcc-wrapper.
+      gcc \
       # X11 client libraries. The `zulu21` Nix wrapper doesn't put
       # these on LD_LIBRARY_PATH, so AWT's XToolkit fails to dlopen
       # libX11.so.6 ("No toolkit found"), which blocks JavaFX init
@@ -49,9 +51,9 @@ RUN nix-env -f '<nixpkgs>' -iA \
       # prepends /root/.nix-profile/lib to LD_LIBRARY_PATH at
       # launch, so installing these here puts the .so files in the
       # right place.
-      nixpkgs.libX11 nixpkgs.libXext nixpkgs.libXtst \
-      nixpkgs.libXi nixpkgs.libXrender nixpkgs.libXt \
-      nixpkgs.libXdmcp nixpkgs.libXau
+      libX11 libXext libXtst \
+      libXi libXrender libXt \
+      libXdmcp libXau
 
 ENV PATH="/root/.nix-profile/bin:${PATH}"
 
@@ -120,7 +122,7 @@ RUN set -eux; \
 
 # Install IBC (from local build with TOTP support)
 USER root
-COPY IBC /home/tws/IBC/
+COPY docker/IBC /home/tws/IBC/
 RUN find /home/tws/IBC -name "*.sh" -type f -exec chmod +x {} \; && \
   chown -R tws:tws /home/tws/IBC
 
@@ -132,13 +134,13 @@ ENV XDG_CONFIG_HOME=/home/tws
 #  path doesn't exist in this image, while the Nix path does.)
 
 USER root
-COPY ibc-config.ini /home/tws/IBC/
-COPY ibkr-entrypoint.sh /docker-entrypoint.sh
-COPY ibc-start.sh /ibc-start.sh
+COPY docker/ibc-config.ini /home/tws/IBC/
+COPY docker/ibkr-entrypoint.sh /docker-entrypoint.sh
+COPY docker/ibc-start.sh /ibc-start.sh
 # /home/tws/java is required by ibcstart.sh when --java-path=/home/tws is set \
 # (it does `[[ ! -e "$java_path/java" ]]` and aborts otherwise). The wrapper \
 # just exec's the system java. \
-COPY --chmod=0755 java-wrapper.sh /home/tws/java
+COPY --chmod=0755 docker/java-wrapper.sh /home/tws/java
 
 # Build the JVMTI key-extraction agent. The agent attaches to TWS on
 # every startup, polls twslaunch.jclient.login.e for the live AES-128

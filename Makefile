@@ -18,6 +18,13 @@ ps: ## Show running containers
 restart: ## Restart the container
 	docker compose restart
 
+extract-key: ## Attach the JVMTI key-extraction agent to the running TWS JVM
+	./scripts/decrypt/extract-key.sh
+
+decrypt: ## Decrypt a log: make decrypt LOG=path/to/log.ibgzenc
+	@if [ -z "$(LOG)" ]; then echo "usage: make decrypt LOG=path/to/log.ibgzenc"; exit 1; fi
+	./scripts/decrypt/decrypt.sh "$(LOG)"
+
 help:
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-15s\033[0m %s\n", $$1, $$2}'
 

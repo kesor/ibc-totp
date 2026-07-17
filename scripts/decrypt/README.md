@@ -7,21 +7,45 @@ AES-128-CBC + HMAC-SHA256 with a per-session key.
 
 The Docker image includes a native JVMTI agent
 (`scripts/decrypt/agent.c`, built into `/home/tws/.tws-tools/libagent.so`)
-that TWS loads on every startup (`-agentpath:...` in `java-wrapper.sh`).
+that, when attached to a running TWS JVM, polls the runtime context
+for the live AES-128 logKey and writes timestamped key files.
 
-The agent:
+The agent is **disabled by default at JVM startup** (see
+`IBC_DISABLE_AGENT=1` in `docker/java-wrapper.sh`). The combination
+of Zulu OpenJDK 21 + TWS 10.48 + `-agentpath:` crashes the JVM
+during `Threads::create_vm` with SIGSEGV. The same agent works
+fine when attached AFTER TWS is fully running.
 
-1. Tries once immediately at JVM startup (usually too early — auth
-   hasn't run yet).
-2. Spawns a background pthread that polls `twslaunch.jclient.login.e.u()`
-   every 15 s. Each time a new key is observed, the agent writes a new
-   timestamped file:
+Workflow after `make up`:
+
+```bash
+# 1. TWS is running. Attach the agent to get the live key.
+make extract-key
+
+# 2. Decrypt a log (auto-picks the right key by mtime).
+make decrypt LOG=~/src/ibkr/jts/oafdlo.../tws.YYYYMMDD.HHMMSS.ibgzenc
+```
+
+Or directly:
+
+```bash
+./scripts/decrypt/extract-key.sh
+./scripts/decrypt/decrypt.sh /path/to/log.ibgzenc
+```
+
+The agent, when attached:
+
+1. Spawns a background pthread that polls `twslaunch.jclient.login.e.u()`
+   every 15 s (after a 3-second startup delay). Each time a new key is
+   observed, the agent writes a new timestamped file:
    ```
    /home/tws/jts/logs/keys/key-<unix-ts>.hex
    ```
    and updates a `current` symlink to point at the latest one.
-3. Deduplicates: if the key hasn't changed since the last poll, no
+2. Deduplicates: if the key hasn't changed since the last poll, no
    new file is written. The keys archive grows once per TWS session.
+3. Writes a unique trace file `/tmp/agent-trace-<pid>-<ts>.log` per
+   attach (avoids races with external cleanup).
 
 `docker-compose.yaml` bind-mounts the host directory `~/src/ibkr/jts/`
 at `/home/tws/jts/` inside the container, so everything TWS writes
@@ -77,6 +101,7 @@ held in memory by twslaunch.jclient.login.e as field `t`.
 | `decrypt.sh` | Decrypt a log (auto-picks the matching key) |
 | `decrypt.py` | Pure-Python AES-128-CBC + HMAC-SHA256 + raw-deflate |
 | `agent.c` | Native JVMTI agent (built into the Docker image) |
+| `extract-key.sh` | Attach the agent to running TWS, write key to disk |
 | `find-key.sh` | Print the current AES key |
 | `copy_active_log.sh` | Copy the most recent `.ibgzenc` to `/tmp/` |
 

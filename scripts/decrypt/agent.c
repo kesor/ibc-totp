@@ -1,35 +1,33 @@
 /*
- * agent.c — Native JVMTI agent that extracts the TWS AES-128 logKey
- * and writes it to a host-mounted directory.
+ * agent.c — Native JVMTI agent that extracts the TWS AES-128 logKey.
  *
- * Two execution phases:
+ * Design notes
+ * ------------
  *
- *  1. On Agent_OnAttach (immediately at JVM startup): try once.
- *     Most of the time this is too early — TWS auth hasn't completed
- *     and `twslaunch.jclient.login.e.t` is still null.
+ * Loading this agent via `-agentpath:` at TWS JVM startup crashes the
+ * JVM with SIGSEGV during Threads::create_vm. We don't fully
+ * understand why — likely an interaction between Zulu 21's TLAB init
+ * and JVMTI's on-load machinery. The same agent works fine when
+ * attached LATER via `jcmd JVMTI.agent_load` after TWS is fully
+ * running.
  *
- *  2. Background poll thread: every POLL_INTERVAL_MS, re-attempt the
- *     extraction. Each time we see a different key, write a new file
- *     `<KEYS_DIR>/key-<unix-ts>.hex` so old log files can always be
- *     matched with the key that was live when they were written.
+ * The workaround: do nothing in Agent_OnAttach. Just spawn a
+ * pthread that, after a short delay, attempts the extraction. By
+ * the time the thread runs (even when attached at startup), the JVM
+ * is past TLAB init.
  *
- * The key filename pattern (timestamp-based, not session-id-based)
- * means the host can:
- *   - list keys sorted by mtime to see which one is current
- *   - keep all keys forever, decrypt any historical log
- *   - use the most-recent key for "I just want today's logs"
+ * If VMInit IS available (we can detect it via the JVMTI env), we
+ * register the VMInit callback too — it's the safer place to do
+ * real work when attaching at startup.
+ *
+ * Output:
+ *   /home/tws/jts/logs/keys/key-<unix-ts>.hex
+ *   /home/tws/jts/logs/keys/current -> key-<ts>.hex (symlink)
+ *   /tmp/agent-trace.log
  *
  * Compile:
  *   gcc -O2 -fPIC -shared -o libagent.so agent.c \
  *       -I$JDK/include -I$JDK/include/linux
- *
- * JVM flag to load:
- *   -agentpath:/home/tws/.tws-tools/libagent.so
- *
- * Output:
- *   /home/tws/jts/logs/keys/key-<unix-ts>.hex   (32-char lowercase hex)
- *   /home/tws/jts/logs/keys/current -> key-<unix-ts>.hex  (symlink)
- *   /tmp/agent-trace.log                        (verbose trace)
  */
 #include <jvmti.h>
 #include <jni.h>
@@ -46,14 +44,16 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#define TRACE_PATH    "/tmp/agent-trace.log"
-#define KEYS_DIR      "/home/tws/jts/logs/keys"
-#define CURRENT_LINK   KEYS_DIR "/current"
+#define TRACE_BASE       "/tmp/agent-trace"
+#define KEYS_DIR         "/home/tws/jts/logs/keys"
+#define CURRENT_LINK     KEYS_DIR "/current"
 #define POLL_INTERVAL_MS 15000
+#define STARTUP_DELAY_MS 3000   /* give the JVM time to leave TLAB init */
 
 static JavaVM *g_vm = NULL;
 static pthread_t g_poller;
 static volatile int g_should_stop = 0;
+static char g_trace_path[256];
 
 /* ---------- trace helpers ---------- */
 
@@ -62,7 +62,14 @@ static pthread_mutex_t g_trace_mu = PTHREAD_MUTEX_INITIALIZER;
 
 static void trace_open(void) {
     if (g_trace_fp) return;
-    g_trace_fp = fopen(TRACE_PATH, "a");
+    /* Each attach writes to a unique trace file based on the agent's
+     * PID + timestamp. This avoids the race where `rm + touch`
+     * invalidates our fd. The script can cat all of them. */
+    if (g_trace_path[0] == '\0') {
+        snprintf(g_trace_path, sizeof g_trace_path, "%s-%d-%lld.log",
+                 TRACE_BASE, (int)getpid(), (long long)time(NULL));
+    }
+    g_trace_fp = fopen(g_trace_path, "w");
 }
 
 static void trace(const char *msg) {
@@ -91,51 +98,37 @@ static void tracef(const char *fmt, ...) {
 
 /* ---------- key extraction ---------- */
 
-/* Compare `n` bytes at `a` and `b`. */
+static unsigned char g_last_key[32] = {0};
+static int g_last_key_len = 0;
+
 static int bytes_eq(const unsigned char *a, const unsigned char *b, int n) {
     for (int i = 0; i < n; i++) if (a[i] != b[i]) return 0;
     return 1;
 }
 
-/* Write `hex` (length `n`) to KEYS_DIR/key-<ts>.hex and update the
- * `current` symlink. No-op if `hex` is NULL or empty, or identical
- * to the most-recent key (we already have a file for it).
- */
-static unsigned char g_last_key[32] = {0};
-static int g_last_key_len = 0;
-
 static void maybe_write_key(const unsigned char *bytes, int n) {
     if (!bytes || n <= 0) return;
     if (n == g_last_key_len && bytes_eq(bytes, g_last_key, n)) {
-        /* Same key as last time — just refresh the `current` symlink
-         * to point at the existing file (in case it was deleted) and
-         * skip the write. */
         return;
     }
     memcpy(g_last_key, bytes, n);
     g_last_key_len = n;
-    if (!bytes || n <= 0) return;
+
+    char path[256];
+    snprintf(path, sizeof path, "%s", KEYS_DIR);
+    for (char *p = path + 1; *p; p++) {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(path, 0777);
+            *p = '/';
+        }
+    }
+    mkdir(path, 0777);
+
     char ts[32];
     snprintf(ts, sizeof ts, "%lld", (long long)time(NULL));
-    char path[256];
     snprintf(path, sizeof path, "%s/key-%s.hex", KEYS_DIR, ts);
 
-    /* mkdir -p for the keys dir; ignore EEXIST. Walk up the path
- * and create each segment. */
-    {
-        char path[256];
-        snprintf(path, sizeof path, "%s", KEYS_DIR);
-        for (char *p = path + 1; *p; p++) {
-            if (*p == '/') {
-                *p = '\0';
-                mkdir(path, 0777);  /* ignore errors */
-                *p = '/';
-            }
-        }
-        mkdir(path, 0777);  /* final segment, ignore EEXIST */
-    }
-
-    /* Write hex. */
     FILE *f = fopen(path, "w");
     if (!f) {
         tracef("open(%s) failed: errno=%d", path, errno);
@@ -149,7 +142,6 @@ static void maybe_write_key(const unsigned char *bytes, int n) {
     fclose(f);
     tracef("wrote key file %s (len=%d)", path, n);
 
-    /* Update `current` symlink (best-effort). */
     char target[64];
     snprintf(target, sizeof target, "key-%s.hex", ts);
     unlink(CURRENT_LINK);
@@ -158,52 +150,49 @@ static void maybe_write_key(const unsigned char *bytes, int n) {
     }
 }
 
-/* Returns the key length on success (16/24/32), or -1 on failure.
- * Caller does NOT own the returned bytes — they reference a JNI
- * local ref that becomes invalid when the thread detaches.
- */
 static int extract_key(void) {
     if (!g_vm) return -1;
 
+    struct JavaVM_ {
+        const struct JNIInvokeInterface_ *functions;
+    } *jvm = (struct JavaVM_ *)g_vm;
+
     JNIEnv *jni = NULL;
-    /* Attach current (poller) thread. */
-    jint res = (*g_vm)->AttachCurrentThread(g_vm, (void **)&jni, NULL);
+    jint res = jvm->functions->AttachCurrentThread(g_vm, (void **)&jni, NULL);
     if (res != JNI_OK || !jni) {
-        tracef("AttachCurrentThread failed: %d", (int)res);
+        tracef("extract_key: AttachCurrentThread failed: %d", (int)res);
         return -1;
     }
 
-    /* twslaunch.jsetting.H */
+#define DETACH(R) do { jvm->functions->DetachCurrentThread(g_vm); return R; } while (0)
+
     jclass clsH = (*jni)->FindClass(jni, "twslaunch/jsetting/H");
-    if (!clsH) { (*jni)->ExceptionClear(jni); (*g_vm)->DetachCurrentThread(g_vm); return -1; }
+    if (!clsH) { (*jni)->ExceptionClear(jni); DETACH(-1); }
     jmethodID mid_a = (*jni)->GetStaticMethodID(jni, clsH, "a",
         "()Ltwslaunch/jclient/login/l;");
-    if (!mid_a) { (*jni)->ExceptionClear(jni); (*g_vm)->DetachCurrentThread(g_vm); return -1; }
+    if (!mid_a) { (*jni)->ExceptionClear(jni); DETACH(-1); }
 
     jobject lInstance = (*jni)->CallStaticObjectMethod(jni, clsH, mid_a);
     if (!lInstance || (*jni)->ExceptionCheck(jni)) {
         (*jni)->ExceptionClear(jni);
-        (*g_vm)->DetachCurrentThread(g_vm);
-        return -1;
+        DETACH(-1);
     }
 
     jclass clsL = (*jni)->FindClass(jni, "twslaunch/jclient/login/l");
-    if (!clsL) { (*jni)->ExceptionClear(jni); (*g_vm)->DetachCurrentThread(g_vm); return -1; }
+    if (!clsL) { (*jni)->ExceptionClear(jni); DETACH(-1); }
     jmethodID mid_u = (*jni)->GetMethodID(jni, clsL, "u", "()[B");
-    if (!mid_u) { (*jni)->ExceptionClear(jni); (*g_vm)->DetachCurrentThread(g_vm); return -1; }
+    if (!mid_u) { (*jni)->ExceptionClear(jni); DETACH(-1); }
 
     jbyteArray keyArr = (*jni)->CallObjectMethod(jni, lInstance, mid_u);
     if (!keyArr || (*jni)->ExceptionCheck(jni)) {
         (*jni)->ExceptionClear(jni);
-        (*g_vm)->DetachCurrentThread(g_vm);
-        return -1;
+        DETACH(-1);
     }
 
     jsize len = (*jni)->GetArrayLength(jni, keyArr);
     if (len != 16 && len != 24 && len != 32) {
         tracef("unexpected key length %d", (int)len);
-        (*g_vm)->DetachCurrentThread(g_vm);
-        return -1;
+        DETACH(-1);
     }
 
     jbyte *bytes = (*jni)->GetByteArrayElements(jni, keyArr, NULL);
@@ -213,15 +202,19 @@ static int extract_key(void) {
         result = (int)len;
         (*jni)->ReleaseByteArrayElements(jni, keyArr, bytes, JNI_ABORT);
     }
-    (*g_vm)->DetachCurrentThread(g_vm);
-    return result;
+    DETACH(result);
 }
 
 /* ---------- poller thread ---------- */
 
 static void *poll_thread(void *arg) {
     (void)arg;
+    /* Sleep first to give the JVM time to leave startup. */
+    for (int i = 0; i < STARTUP_DELAY_MS / 1000 && !g_should_stop; i++) {
+        sleep(1);
+    }
     trace("poll thread: start");
+
     int consecutive_failures = 0;
     while (!g_should_stop) {
         int rc = extract_key();
@@ -235,7 +228,6 @@ static void *poll_thread(void *arg) {
                        consecutive_failures);
             }
         }
-        /* Sleep in 1s slices so we shut down promptly. */
         for (int i = 0; i < POLL_INTERVAL_MS / 1000 && !g_should_stop; i++) {
             sleep(1);
         }
@@ -246,26 +238,70 @@ static void *poll_thread(void *arg) {
 
 /* ---------- JVMTI entry points ---------- */
 
+static void on_vm_init(jvmtiEnv *jvmti_env, JNIEnv *jni_env, jobject arg) {
+    (void)jvmti_env; (void)jni_env; (void)arg;
+    trace("VMInit: fire");
+
+    /* Try once. Most TWS startups take 10-30s for auth, so this
+     * almost always returns null. The poller will catch the key. */
+    int rc = extract_key();
+    tracef("VMInit: initial extract returned %d", rc);
+
+    /* If we somehow didn't start the poller yet (because VMInit
+     * fired before Agent_OnAttach's pthread_create ran — unlikely
+     * but possible), start it now. */
+    if (pthread_create(&g_poller, NULL, poll_thread, NULL) != 0) {
+        trace("VMInit: pthread_create failed");
+        return;
+    }
+    pthread_detach(g_poller);
+    trace("VMInit: end (poller running)");
+}
+
 JNIEXPORT jint JNICALL Agent_OnAttach(JavaVM *vm, char *options, void *reserved) {
     (void)options; (void)reserved;
     trace("Agent_OnAttach: start");
 
     g_vm = vm;
 
-    /* Try once immediately. Almost always fails because the auth flow
-     * hasn't run yet, but no harm in trying. */
-    int rc = extract_key();
-    tracef("Agent_OnAttach: initial extract returned %d", rc);
+    /* Try to register the VMInit callback. If the JVM is past init
+     * (we were attached after startup), VMInit will never fire —
+     * the poller thread spawned below is the fallback. */
+    {
+        struct JavaVM_ {
+            const struct JNIInvokeInterface_ *functions;
+        } *jvm = (struct JavaVM_ *)vm;
+        jvmtiEnv *jvmti = NULL;
+        jint res = jvm->functions->GetEnv(vm, (void **)&jvmti, JVMTI_VERSION_1_2);
+        if (res == JNI_OK && jvmti) {
+            jvmtiEventCallbacks cbs = {0};
+            cbs.VMInit = on_vm_init;
+            res = (*jvmti)->SetEventCallbacks(jvmti, &cbs, sizeof cbs);
+            if (res == JNI_OK) {
+                res = (*jvmti)->SetEventNotificationMode(jvmti, JVMTI_ENABLE,
+                                                          JVMTI_EVENT_VM_INIT, NULL);
+                if (res == JNI_OK) {
+                    trace("setup: VMInit callback registered");
+                } else {
+                    tracef("setup: SetEventNotificationMode failed: %d", (int)res);
+                }
+            } else {
+                tracef("setup: SetEventCallbacks failed: %d", (int)res);
+            }
+        } else {
+            tracef("setup: GetEnv failed: %d (no JVMTI — late attach?)", (int)res);
+        }
+    }
 
-    /* Start the background poller. */
+    /* Always spawn the poller thread. If VMInit also fires, both
+     * might race to start it — we tolerate the duplicate. */
     if (pthread_create(&g_poller, NULL, poll_thread, NULL) != 0) {
         trace("Agent_OnAttach: pthread_create failed");
         return JNI_ERR;
     }
-    /* Detach the poller thread — it manages its own JNI attach loop. */
     pthread_detach(g_poller);
 
-    trace("Agent_OnAttach: end (poller running)");
+    trace("Agent_OnAttach: end");
     return JNI_OK;
 }
 

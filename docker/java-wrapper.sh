@@ -16,8 +16,16 @@ export LD_LIBRARY_PATH="/root/.nix-profile/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PA
 # is bind-mounted from the host so we can decrypt .ibgzenc log files
 # later. See scripts/decrypt/agent.c for the full implementation.
 # The agent is a no-op if /home/tws/.tws-tools/libagent.so is missing.
+#
+# IMPORTANT: this auto-load path CRASHES TWS at startup with SIGSEGV
+# during Threads::create_vm — the combination of Zulu OpenJDK 21 +
+# TWS 10.48 + -agentpath: appears incompatible. Loading the same
+# agent AFTER TWS is running (via `jcmd JVMTI.agent_load`) works fine.
+# We default IBC_DISABLE_AGENT to 1 (disabled). To auto-extract keys,
+# run scripts/decrypt/extract-key.sh after `make up` (or call it from
+# a Make target).
 AGENT="/home/tws/.tws-tools/libagent.so"
-if [ -f "$AGENT" ]; then
+if [ "${IBC_DISABLE_AGENT:-1}" != "1" ] && [ -f "$AGENT" ]; then
     set -- -agentpath:"$AGENT" "$@"
 fi
 

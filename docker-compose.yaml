@@ -1,8 +1,8 @@
 services:
   tws:
     build:
-      context: ./docker
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: docker/Dockerfile
     container_name: ibkr-tws-prod
     ports:
       - "5901:5900"  # VNC
@@ -15,7 +15,7 @@ services:
     # The host user MUST have uid 1000 (matching the in-container `tws`
     # user) for this to be writable. See README "Setup" section.
     volumes:
-      - ../jts:/home/tws/jts
+      - ./jts:/home/tws/jts
     environment:
       - DISPLAY=:0
       - TZ=Asia/Jerusalem

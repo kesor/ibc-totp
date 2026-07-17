@@ -14,7 +14,7 @@ export TWS_CREDS_FILE="/run/secrets/tws"
 ulimit -c 0
 echo 0 > /proc/sys/kernel/core_pattern 2>/dev/null || true
 
-ts=$(date -Iminutes|sed -e's/+.*$//g;s[:-]//g')
+ts=$(date -Iminutes | sed 's/+.*//; s/[-:]//g')
 
 cd "${HOME}" || exit 1
 
