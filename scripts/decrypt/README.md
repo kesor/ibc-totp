@@ -10,27 +10,33 @@ The Docker image includes a native JVMTI agent
 that, when attached to a running TWS JVM, polls the runtime context
 for the live AES-128 logKey and writes timestamped key files.
 
-The agent is **disabled by default at JVM startup** (see
+The agent is **not** loaded at JVM startup (see
 `IBC_DISABLE_AGENT=1` in `docker/java-wrapper.sh`). The combination
 of Zulu OpenJDK 21 + TWS 10.48 + `-agentpath:` crashes the JVM
 during `Threads::create_vm` with SIGSEGV. The same agent works
 fine when attached AFTER TWS is fully running.
 
-Workflow after `make up`:
+**Automatic path (inside the container):** `docker/attach-agent.sh`
+is started from `ibkr-entrypoint.sh`. It watches for the IBC/TWS
+Java PID, attaches the agent via `jcmd JVMTI.agent_load` whenever
+that PID appears or changes, and bulk-decrypts every `*.ibgzenc`
+under `/home/tws/jts` once a key is available (and periodically
+afterwards so growing logs stay updated).
+
+Manual / host-side workflow:
 
 ```bash
-# 1. TWS is running. Attach the agent to get the live key.
+# Decrypt every encrypted log under jts/ (default)
+make decrypt
+# or
+./scripts/decrypt/decrypt.sh
+
+# Decrypt one or more specific files
+make decrypt LOG=path/to/log.ibgzenc
+./scripts/decrypt/decrypt.sh path/a.ibgzenc path/b.ibgzenc
+
+# Force re-attach agent from the host (usually unnecessary)
 make extract-key
-
-# 2. Decrypt a log (auto-picks the right key by mtime).
-make decrypt LOG=~/src/ibkr/jts/oafdlo.../tws.YYYYMMDD.HHMMSS.ibgzenc
-```
-
-Or directly:
-
-```bash
-./scripts/decrypt/extract-key.sh
-./scripts/decrypt/decrypt.sh /path/to/log.ibgzenc
 ```
 
 The agent, when attached:
@@ -98,22 +104,26 @@ held in memory by twslaunch.jclient.login.e as field `t`.
 
 | file | what it does |
 |------|-------------|
-| `decrypt.sh` | Decrypt a log (auto-picks the matching key) |
+| `decrypt.sh` | Decrypt one/many logs, or `--all` under the JTS tree |
 | `decrypt.py` | Pure-Python AES-128-CBC + HMAC-SHA256 + raw-deflate |
 | `agent.c` | Native JVMTI agent (built into the Docker image) |
-| `extract-key.sh` | Attach the agent to running TWS, write key to disk |
+| `extract-key.sh` | Host-side manual agent attach (fallback) |
 | `find-key.sh` | Print the current AES key |
 | `copy_active_log.sh` | Copy the most recent `.ibgzenc` to `/tmp/` |
+| `docker/attach-agent.sh` | In-container auto-attach + bulk decrypt on TWS restart |
 
 ## Quick start
 
 ```bash
-# Decrypt the most recent log
-./copy_active_log.sh
-./decrypt.sh /tmp/active.ibgzenc -o /tmp/tws.log
+# Decrypt every *.ibgzenc under jts/ (skips up-to-date .log files)
+./decrypt.sh
+# or: make decrypt
 
-# Decrypt a specific archived log directly from the host
+# Decrypt specific files
 ./decrypt.sh ~/src/ibkr/jts/oafdloimf.../tws.20260717.180820.ibgzenc
+
+# Force re-decrypt even if .log is newer
+./decrypt.sh --all --force
 
 # Get the current key
 ./find-key.sh

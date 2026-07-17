@@ -28,6 +28,14 @@ mkdir -p "${HOME}/jts"
 # will appear in the host dir owned by uid 1000.
 mkdir -p "${HOME}/jts/logs/keys" "${HOME}/jts/logs/decrypted"
 
+# Ensure JxBrowser Chromium is extracted + patchelf'd (and re-published
+# under /tmp/JxBrowser after a container recreate wipes /tmp). Built
+# into the image by the Dockerfile; this is a cheap no-op when the
+# marker is already present.
+if [ -x /setup-jxbrowser.sh ]; then
+    /setup-jxbrowser.sh || echo "[entrypoint] setup-jxbrowser failed (charts may not work)" >&2
+fi
+
 # Tidy up after any pre-restart crashes:
 #   - core.* files dropped by chromium/JVM aborts (these lived on the
 #     ephemeral container layer, but `core` files in $HOME will still
@@ -62,5 +70,13 @@ nohup tint2 2>"tint2-err-${ts}.log" >"tint2-out-${ts}.log" &
 
 nohup x11vnc -nopw -display "${DISPLAY}" -forever 2>"x11-err-${ts}.log" >"x11-out-${ts}.log" &
 nohup /ibc-start.sh 2>"ibc-err-${ts}.log" >"ibc-out-${ts}.log" &
+
+# Keep the JVMTI key-extraction agent attached across TWS restarts, and
+# bulk-decrypt any .ibgzenc logs once a key is available. See
+# docker/attach-agent.sh — we cannot use -agentpath at JVM startup
+# (SIGSEGV); post-start jcmd attach is the path that works.
+if [ -x /attach-agent.sh ]; then
+    nohup /attach-agent.sh 2>"attach-agent-err-${ts}.log" >"attach-agent-out-${ts}.log" &
+fi
 
 sleep infinity

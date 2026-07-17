@@ -43,6 +43,16 @@ RUN nix-env -f '<nixpkgs>' -iA \
       # build time. Don't add binutils separately — its wrappers
       # conflict with gcc-wrapper.
       gcc \
+      # In-container bulk decryption of .ibgzenc logs (attach-agent.sh
+      # → decrypt.sh → decrypt.py).
+      python3 \
+      python3Packages.pycryptodome \
+      # JxBrowser Chromium prep (setup-jxbrowser.sh): extract the
+      # private Chromium tree with nix 7zr, then patchelf it to the
+      # same interpreter/RUNPATH as ungoogled-chromium. The jar's own
+      # 7zr-linux64 is an FHS binary and cannot exec on Nix.
+      p7zip \
+      patchelf \
       # X11 client libraries. The `zulu21` Nix wrapper doesn't put
       # these on LD_LIBRARY_PATH, so AWT's XToolkit fails to dlopen
       # libX11.so.6 ("No toolkit found"), which blocks JavaFX init
@@ -137,25 +147,39 @@ USER root
 COPY docker/ibc-config.ini /home/tws/IBC/
 COPY docker/ibkr-entrypoint.sh /docker-entrypoint.sh
 COPY docker/ibc-start.sh /ibc-start.sh
+COPY --chmod=0755 docker/attach-agent.sh /attach-agent.sh
+COPY --chmod=0755 docker/setup-jxbrowser.sh /setup-jxbrowser.sh
 # /home/tws/java is required by ibcstart.sh when --java-path=/home/tws is set \
 # (it does `[[ ! -e "$java_path/java" ]]` and aborts otherwise). The wrapper \
 # just exec's the system java. \
 COPY --chmod=0755 docker/java-wrapper.sh /home/tws/java
 
-# Build the JVMTI key-extraction agent. The agent attaches to TWS on
-# every startup, polls twslaunch.jclient.login.e for the live AES-128
-# logKey, and writes it to /home/tws/jts/logs/keys/key-<ts>.hex so the
-# host can decrypt .ibgzenc log files without re-running anything.
-# Headers come from the zulu21 package installed above.
-COPY ../scripts/decrypt/agent.c /tmp/agent.c
+# Build the JVMTI key-extraction agent + install decrypt tools used by
+# attach-agent.sh. The agent is attached POST-startup via jcmd (not
+# -agentpath — that SIGSEGVs during Threads::create_vm). It polls
+# twslaunch.jclient.login.e for the live AES-128 logKey and writes
+# /home/tws/jts/logs/keys/key-<ts>.hex. Headers come from zulu21.
+COPY scripts/decrypt/agent.c /tmp/agent.c
+COPY scripts/decrypt/decrypt.py scripts/decrypt/decrypt.sh /home/tws/.tws-tools/
 RUN mkdir -p /home/tws/.tws-tools && \
     gcc -O2 -fPIC -shared -o /home/tws/.tws-tools/libagent.so \
         /tmp/agent.c \
         -I/root/.nix-profile/include -I/root/.nix-profile/include/linux && \
     rm -f /tmp/agent.c && \
-    chown root:root /home/tws/.tws-tools/libagent.so && \
-    chmod 0644 /home/tws/.tws-tools/libagent.so && \
+    chmod 0755 /home/tws/.tws-tools/decrypt.sh && \
+    chmod 0644 /home/tws/.tws-tools/decrypt.py \
+               /home/tws/.tws-tools/libagent.so && \
+    chown -R root:root /home/tws/.tws-tools && \
     ls -la /home/tws/.tws-tools/
+
+# Pre-extract JxBrowser Chromium + install /lib64 dynamic linker
+# (TradingView / advanced charts). Must run as root after the TWS
+# install layer that drops jxbrowser-linux64-*.jar. We keep file
+# sizes byte-identical to the jar (no patchelf) so JxBrowser's size
+# verification passes; java-wrapper.sh supplies LD_LIBRARY_PATH from
+# the working ungoogled-chromium RUNPATH. See docker/setup-jxbrowser.sh.
+RUN /setup-jxbrowser.sh && \
+    chown -R tws:tws /home/tws/.jxbrowser /home/tws/.tws-tools/jxbrowser-ld-path
 
 # Pre-create /home/tws/chromium with the right ownership and perms so a
 # fresh chromium-data named volume (which docker creates as root) gets
