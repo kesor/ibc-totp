@@ -9,15 +9,13 @@ services:
     secrets:
       - tws
     restart: unless-stopped
+    # Bind-mount the entire TWS data directory to the host. Everything
+    # TWS writes to /home/tws/jts (encrypted log files, the keys archive,
+    # settings, jts.ini, ...) ends up in ~/src/ibkr/jts/ on the host.
+    # The host user MUST have uid 1000 (matching the in-container `tws`
+    # user) for this to be writable. See README "Setup" section.
     volumes:
-      - tws-data:/home/tws/jts
-      # Host-visible archive of decryption keys (written by the in-container
-      # JVMTI agent) and decrypted plaintext logs. The encrypted .ibgzenc
-      # files themselves stay on the `tws-data` named volume above.
-      # The host directory must be writable by uid 1000 (the `tws` user
-      # inside the container). If your host user has a different uid, see
-      # docs/decryption-keys-volume.md for chown instructions.
-      - ../logs:/home/tws/jts/logs
+      - ../jts:/home/tws/jts
     environment:
       - DISPLAY=:0
       - TZ=Asia/Jerusalem
@@ -28,6 +26,3 @@ services:
 secrets:
   tws:
     file: ./docker/tws.secrets
-
-volumes:
-  tws-data:

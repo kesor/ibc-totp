@@ -20,9 +20,34 @@ The agent:
    /home/tws/jts/logs/keys/key-<unix-ts>.hex
    ```
    and updates a `current` symlink to point at the latest one.
+3. Deduplicates: if the key hasn't changed since the last poll, no
+   new file is written. The keys archive grows once per TWS session.
 
-This means: **as long as TWS is running, the host can decrypt any log
-ever produced by reading the right key from the persistent volume.**
+`docker-compose.yaml` bind-mounts the host directory `~/src/ibkr/jts/`
+at `/home/tws/jts/` inside the container, so everything TWS writes
+(encrypted logs, keys, settings, jts.ini, ...) ends up on the host.
+**As long as TWS is running, the host can decrypt any log ever
+produced.**
+
+## Persistent layout
+
+```
+~/src/ibkr/jts/                         (the bind-mount target on host)
+├── <per-user-hash>/                    (created by TWS at first run)
+│   ├── ads/                            (binary ad images, ignorable)
+│   ├── audits/
+│   ├── api.*.ibgzenc                  # older encrypted API logs
+│   └── tws.YYYYMMDD.HHMMSS.ibgzenc    # current encrypted log file(s)
+├── launcher.log                        # plaintext last-lines of TWS log
+├── launcher.YYYYMMDD.log               # older dated plaintext logs
+├── jts.ini                             # TWS settings
+└── logs/                               # written by our agent/script
+    ├── keys/
+    │   ├── key-1784315000.hex          # one per TWS session, never deleted
+    │   ├── key-1784316000.hex
+    │   └── current -> key-...          # symlink to latest
+    └── decrypted/                      # default output dir for decrypt.sh
+```
 
 ## Format (TWS 10.48.x)
 
@@ -53,20 +78,23 @@ held in memory by twslaunch.jclient.login.e as field `t`.
 | `decrypt.py` | Pure-Python AES-128-CBC + HMAC-SHA256 + raw-deflate |
 | `agent.c` | Native JVMTI agent (built into the Docker image) |
 | `find-key.sh` | Print the current AES key |
-| `copy_active_log.sh` | Pull the most recent `.ibgzenc` from the container |
+| `copy_active_log.sh` | Copy the most recent `.ibgzenc` to `/tmp/` |
 
 ## Quick start
 
 ```bash
-# Decrypt the latest log pulled from the container
+# Decrypt the most recent log
 ./copy_active_log.sh
 ./decrypt.sh /tmp/active.ibgzenc -o /tmp/tws.log
 
-# Or decrypt a specific archived log
-./decrypt.sh /path/to/tws.20260717.180820.ibgzenc
+# Decrypt a specific archived log directly from the host
+./decrypt.sh ~/src/ibkr/jts/oafdloimf.../tws.20260717.180820.ibgzenc
 
 # Get the current key
 ./find-key.sh
+
+# List all historical keys
+ls -lt ~/src/ibkr/jts/logs/keys/
 ```
 
 `decrypt.py` picks the right key by matching the log file's mtime
@@ -74,29 +102,42 @@ against the timestamp in `key-<unix-ts>.hex`. If no key is older than
 the log, it falls back to the most-recent one (the agent's `current`
 symlink).
 
-## Persistent layout
+## Setup
 
-`docker-compose.yaml` mounts the host directory `~/src/ibkr/logs/` at
-`/home/tws/jts/logs/` inside the container. Subdirectories:
+If you're setting this up for the first time:
 
-```
-~/src/ibkr/logs/
-├── keys/
-│   ├── key-1784315000.hex      # one per extraction, never deleted
-│   ├── key-1784316000.hex
-│   └── current -> key-...      # symlink to latest
-└── decrypted/                   # default output dir for decrypt.sh
-```
+1. Make sure `~/src/ibkr/jts/` exists and is owned by your user
+   (the in-container `tws` user has uid 1000, so your host user must
+   also be uid 1000 for writes to work):
+   ```bash
+   mkdir -p ~/src/ibkr/jts
+   ```
 
-The encrypted logs themselves stay on the `tws-data` named volume
-(`/home/tws/jts/oafdloimfccaidpfefaiepmggncpjjnikeekcofk/`) — pull
-them with `copy_active_log.sh` or browse them on the host volume
-directly via `docker volume inspect tws-data`.
+2. `make down && make up` to recreate the container with the new
+   bind-mount. The first start will be a clean TWS session — the old
+   named volume data (`tws-data`) is preserved by Docker but no
+   longer mounted; you can `docker volume rm ibkr_tws-data` to clean
+   it up later.
+
+3. Wait ~30 seconds for TWS to authenticate. Then:
+   ```bash
+   ls ~/src/ibkr/jts/logs/keys/
+   # should show key-<ts>.hex and `current` symlink
+   ```
+
+4. Copy any old `*.ibgzenc` files you want to keep from the old
+   named volume (if you care):
+   ```bash
+   docker run --rm -v ibkr_tws-data:/from -v ~/src/ibkr/jts:/to \
+       alpine sh -c 'cp -a /from/oafdloimf.../. /to/oafdloimf.../ 2>/dev/null'
+   ```
+   (Requires `sudo` access on the host to inspect the named volume
+   directly.)
 
 ## Why this works
 
-Earlier we tried offline brute force of the heap dump for the AES key.
-That didn't work because:
+Earlier we tried offline brute force of the heap dump for the AES
+key. That didn't work because:
 
 - The handoff's "first chunk = keyId 'aaa'" assumption was wrong;
   the keyId is in the cleartext header.
@@ -115,11 +156,11 @@ returns the singleton `l` instance, whose `u()` returns the AES key
 - `python3` with `pycryptodome` (auto-installed via `nix-shell -p
   python3Packages.pycryptodome` if not already present)
 - Docker CLI access to the `ibkr-tws-prod` container
-- The host directory `~/src/ibkr/logs/` exists (created on first
-  `docker compose up`)
+- Host user uid = 1000 (matches the in-container `tws` user)
+- The host directory `~/src/ibkr/jts/` exists
 
 ## Security note
 
-Anyone with read access to `~/src/ibkr/logs/keys/` can decrypt every
-log ever produced by this TWS instance. Treat the directory as
+Anyone with read access to `~/src/ibkr/jts/logs/keys/` can decrypt
+every log ever produced by this TWS instance. Treat the directory as
 sensitive as the IBKR credentials themselves.

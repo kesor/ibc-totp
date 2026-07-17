@@ -92,9 +92,13 @@ and uses JNI reflection to call
 
 - Container: `ibkr-tws-prod`, TWS user `tws` uid 1000
 - `-Xmx2048m`, G1 GC, Zulu OpenJDK 21
-- Host bind-mount: `~/src/ibkr/logs/` → `/home/tws/jts/logs/`
-- Encrypted logs (untouched by the agent): on the `tws-data` named
-  volume at `/home/tws/jts/oafdloimfccaidpfefaiepmggncpjjnikeekcofk/`
+- Host bind-mount: `~/src/ibkr/jts/` → `/home/tws/jts/`
+- Encrypted logs (written by TWS itself): on the host at
+  `~/src/ibkr/jts/oafdloimfccaidpfefaiepmggncpjjnikeekcofk/`
+- Keys (written by the in-container JVMTI agent): on the host at
+  `~/src/ibkr/jts/logs/keys/`
+- The previous `tws-data` named volume + separate `../logs` mount
+  were replaced with this single bind-mount in a later commit.
 
 ## Files
 

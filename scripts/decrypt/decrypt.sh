@@ -30,6 +30,7 @@ POSITIONAL=()
 default_keys_dir() {
     for d in \
         /home/tws/jts/logs/keys \
+        "$HOME/src/ibkr/jts/logs/keys" \
         "$HOME/src/ibkr/logs/keys" \
         /tmp; do
         if [ -d "$d" ]; then
