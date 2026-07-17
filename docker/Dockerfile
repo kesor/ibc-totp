@@ -48,19 +48,18 @@ RUN nix-env -f '<nixpkgs>' -iA \
       python3 \
       python3Packages.pycryptodome \
       # JxBrowser Chromium prep (setup-jxbrowser.sh): extract the
-      # private Chromium tree with nix 7zr, then patchelf it to the
-      # same interpreter/RUNPATH as ungoogled-chromium. The jar's own
-      # 7zr-linux64 is an FHS binary and cannot exec on Nix.
+      # private Chromium tree with nix 7zr. The jar's own 7zr-linux64
+      # is an FHS binary and cannot exec on Nix without our linker
+      # symlink; we use nix 7zr instead and keep file sizes intact.
       p7zip \
       patchelf \
-      # X11 client libraries. The `zulu21` Nix wrapper doesn't put
-      # these on LD_LIBRARY_PATH, so AWT's XToolkit fails to dlopen
-      # libX11.so.6 ("No toolkit found"), which blocks JavaFX init
-      # and the embedded HTTP bridge on port 20000 that serves the
-      # advanced chart / tradingview URL. Our java-wrapper.sh
-      # prepends /root/.nix-profile/lib to LD_LIBRARY_PATH at
-      # launch, so installing these here puts the .so files in the
-      # right place.
+      # Session D-Bus for Chromium/GTK (entrypoint starts dbus-daemon
+      # with the nix session.conf via --config-file).
+      dbus \
+      # Mesa/GLX for Xvfb +iglx (Chromium ANGLE "GLX is not present").
+      # (Usually already pulled by gtk/chromium; listed explicitly.)
+      mesa \
+      # X11 client libraries for AWT/JavaFX glass + XToolkit.
       libX11 libXext libXtst \
       libXi libXrender libXt \
       libXdmcp libXau
@@ -149,9 +148,10 @@ COPY docker/ibkr-entrypoint.sh /docker-entrypoint.sh
 COPY docker/ibc-start.sh /ibc-start.sh
 COPY --chmod=0755 docker/attach-agent.sh /attach-agent.sh
 COPY --chmod=0755 docker/setup-jxbrowser.sh /setup-jxbrowser.sh
+COPY docker/runtime-env.sh /runtime-env.sh
 # /home/tws/java is required by ibcstart.sh when --java-path=/home/tws is set \
 # (it does `[[ ! -e "$java_path/java" ]]` and aborts otherwise). The wrapper \
-# just exec's the system java. \
+# just exec's the system java; shared env comes from runtime-env.sh. \
 COPY --chmod=0755 docker/java-wrapper.sh /home/tws/java
 
 # Build the JVMTI key-extraction agent + install decrypt tools used by

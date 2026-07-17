@@ -28,13 +28,18 @@ mkdir -p "${HOME}/jts"
 # will appear in the host dir owned by uid 1000.
 mkdir -p "${HOME}/jts/logs/keys" "${HOME}/jts/logs/decrypted"
 
-# Ensure JxBrowser Chromium is extracted + patchelf'd (and re-published
-# under /tmp/JxBrowser after a container recreate wipes /tmp). Built
-# into the image by the Dockerfile; this is a cheap no-op when the
-# marker is already present.
+# Ensure JxBrowser Chromium is extracted (and re-published under
+# /tmp/JxBrowser after a container recreate wipes /tmp). Built into
+# the image by the Dockerfile; cheap no-op when the marker is present.
 if [ -x /setup-jxbrowser.sh ]; then
     /setup-jxbrowser.sh || echo "[entrypoint] setup-jxbrowser failed (charts may not work)" >&2
 fi
+
+# Shared env for every service we start below (OpenJFX natives,
+# LD_LIBRARY_PATH, JAVA_TOOL_OPTIONS, gsettings). Must run after
+# setup-jxbrowser so jxbrowser-ld-path exists.
+# shellcheck source=/dev/null
+. /runtime-env.sh
 
 # Tidy up after any pre-restart crashes:
 #   - core.* files dropped by chromium/JVM aborts (these lived on the
@@ -53,10 +58,52 @@ if [ ! -f "${TWS_CREDS_FILE}" ]; then
     exit 1
 fi
 
+# --- session D-Bus -------------------------------------------------------
+# Chromium/JxBrowser and GTK want a session bus. Without it the logs
+# fill with "Failed to connect to the bus" / GLib-GIO-CRITICAL noise.
+# A private unix socket under /tmp is enough; no system bus needed.
+# Unique socket path so a fast docker-restart cannot race a dying daemon
+# still bound to a fixed /tmp/dbus-session path.
+DBUS_SOCK="/tmp/dbus-session-${ts}"
+rm -f "${DBUS_SOCK}"
+if command -v dbus-daemon >/dev/null 2>&1; then
+    # Prefer the nix-store session.conf via --config-file. Plain
+    # `--session` looks for /etc/dbus-1/session.conf; symlinking the
+    # nix file there is circular (it <include>s /etc/dbus-1/session.conf).
+    _dbus_conf=""
+    for _c in /root/.nix-profile/share/dbus-1/session.conf \
+              /nix/store/*-dbus-*/share/dbus-1/session.conf; do
+        if [ -f "${_c}" ]; then
+            _dbus_conf="${_c}"
+            break
+        fi
+    done
+    export DBUS_SESSION_BUS_ADDRESS="unix:path=${DBUS_SOCK}"
+    if [ -n "${_dbus_conf}" ] \
+        && dbus-daemon --config-file="${_dbus_conf}" \
+            --address="${DBUS_SESSION_BUS_ADDRESS}" --fork \
+            2>"dbus-err-${ts}.log"; then
+        echo "[entrypoint] dbus session at ${DBUS_SESSION_BUS_ADDRESS}" >&2
+    else
+        echo "[entrypoint] dbus-daemon failed (see dbus-err-${ts}.log)" >&2
+        unset DBUS_SESSION_BUS_ADDRESS
+    fi
+    unset _c _dbus_conf
+else
+    echo "[entrypoint] dbus-daemon not installed; skipping session bus" >&2
+fi
+
 # Clean up stale X lock files
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0
 
-nohup Xvfb "${DISPLAY}" -br -screen 0 2560x1440x24 2>"xvfb-err-${ts}.log" >"xvfb-out-${ts}.log" &
+# Xvfb with GLX so Chromium/ANGLE can initialize an OpenGL path instead
+# of immediately falling back after "GLX is not present". +iglx enables
+# indirect GLX (default is off on modern Xorg); +extension GLX makes
+# the GLX extension available to clients. Software mesa still backs
+# this under Xvfb — we just stop lying about GLX being missing.
+nohup Xvfb "${DISPLAY}" -br -screen 0 2560x1440x24 \
+    +extension GLX +iglx +extension RANDR +render -noreset \
+    2>"xvfb-err-${ts}.log" >"xvfb-out-${ts}.log" &
 # wait for X server to start
 sleep 15
 # Allow all X connections
