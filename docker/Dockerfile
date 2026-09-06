@@ -5,9 +5,10 @@ ARG TWS_BUILD=stable
 
 # Install packages (cached layer — changes here invalidate only this RUN)
 #
-# Use `zulu21` (Azul Zulu 21) — the same JRE vendor TWS itself bundles
-# (see `jreVersion="17.0.16.0.101-zulu"` in install4j's i4jparams.conf).
-# Pair with `openjfx21` because TWS's launcher uses `--add-exports` flags
+# Use `zulu25` (Azul Zulu 25) — the same JRE vendor TWS itself bundles.
+# The current TWS installer ships install4j bootstrap classes compiled
+# for Java 25 (class file 69.0), so a 21 JRE no longer runs it.
+# Pair with `openjfx25` because TWS's launcher uses `--add-exports` flags
 # for `javafx.*` modules that Zulu doesn't ship — a later RUN adds the
 # openjfx classpath into IBC.
 #
@@ -19,13 +20,19 @@ RUN mkdir -p ~/.config/nixpkgs && \
     cat ~/.config/nixpkgs/config.nix
 
 RUN nix-env -f '<nixpkgs>' -iA \
-      zulu21 \
-      openjfx21 \
+      zulu25 \
+      openjfx25 \
+      # zlib: previously transitively pulled into /root/.nix-profile/lib
+      # by another package; recent nixpkgs cleanup dropped that closure
+      # and `java` started failing with "error while loading shared
+      # libraries: libz.so.1". Install explicitly so /root/.nix-profile/lib
+      # always has libz.so.1 and runtime-env.sh's existing path includes it.
+      zlib \
       curl unzip \
       xorg-server xauth xvfb-run x11vnc \
       openbox tint2 \
       ungoogled-chromium \
-      bash coreutils findutils gnused gnugrep util-linux \
+      bash coreutils findutils gnused gnugrep gawk util-linux \
       fontconfig \
       socat \
       noto-fonts \
@@ -101,7 +108,7 @@ WORKDIR /home/tws
 # points to the bundled JRE which (a) can't run on NixOS (no
 # /lib64/ld-linux-x86-64.so.2) and (b) has a strict version check
 # (17.0.16.0.101 only). We patch the launcher to invoke the bare
-# `java` command instead, which resolves to the zulu21 in
+# `java` command instead, which resolves to the zulu25 in
 # /root/.nix-profile/bin/java. Same trick the flake.nix devShell uses.
 #
 # This sidesteps both the "no dynamic linker" failure and the
@@ -135,6 +142,30 @@ COPY docker/IBC /home/tws/IBC/
 RUN find /home/tws/IBC -name "*.sh" -type f -exec chmod +x {} \; && \
   chown -R tws:tws /home/tws/IBC
 
+# --- Pin Zulu 25 to a known-good patch ---------------------------------
+# Zulu 25.34.17 (jdk25.0.3+9) shipped with a libnet.so regression: calling
+# java.net.NetworkInterface.getAll() from a re-entrant JNI context crashes
+# the JVM with SIGSEGV at jni_NewObject+0xf9. TWS 10.50.1e hits this on
+# startup through feature.telemetry.TelemetryRequestStartSession →
+# oshi.LinuxNetworkIF.getNetworks(). Pin to 25.34.15 (jdk25.0.3+8), the
+# last known-good patch, by overriding zulu25's src to a fixed URL+hash.
+# Remove this layer once Azul ships a fix in 25.0.3+10 or later.
+RUN mkdir -p /tmp/zulu-pin && cat > /tmp/zulu-pin/pinned.nix <<'EOF'
+(import <nixpkgs> {}).zulu25.overrideAttrs (_: {
+  src = (import <nixpkgs> {}).fetchurl {
+    url = "https://cdn.azul.com/zulu/bin/zulu25.34.15-ca-jdk25.0.3-linux_x64.tar.gz";
+    sha256 = "sha256-AUt6sXLiPqFDLhEVI0SLm/Jz0SdcLc1rbNpO6LpuVTI=";
+  };
+})
+EOF
+# Build the pinned derivation, then install it into the user profile by
+# store path (nix-env -iE doesn't accept a derivation set directly).
+RUN _zulu_store=$(nix-build /tmp/zulu-pin/pinned.nix --no-out-link) && \
+    nix-env -i "$_zulu_store" && \
+    rm -rf /tmp/zulu-pin && \
+    echo "--- Pinned Zulu version ---" && \
+    /root/.nix-profile/bin/java -version 2>&1 | head -3
+
 ENV TZ="Asia/Jerusalem"
 ENV DISPLAY=:0
 ENV XDG_CONFIG_HOME=/home/tws
@@ -158,7 +189,7 @@ COPY --chmod=0755 docker/java-wrapper.sh /home/tws/java
 # attach-agent.sh. The agent is attached POST-startup via jcmd (not
 # -agentpath — that SIGSEGVs during Threads::create_vm). It polls
 # twslaunch.jclient.login.e for the live AES-128 logKey and writes
-# /home/tws/jts/logs/keys/key-<ts>.hex. Headers come from zulu21.
+# /home/tws/jts/logs/keys/key-<ts>.hex. Headers come from zulu25.
 COPY scripts/decrypt/agent.c /tmp/agent.c
 COPY scripts/decrypt/decrypt.py scripts/decrypt/decrypt.sh /home/tws/.tws-tools/
 RUN mkdir -p /home/tws/.tws-tools && \
