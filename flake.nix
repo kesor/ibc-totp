@@ -16,7 +16,7 @@
 
         packages = with pkgs; [
           ant
-          openjdk21
+          openjdk25
           curl
           unzip
         ];
