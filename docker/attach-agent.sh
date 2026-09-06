@@ -84,6 +84,78 @@ attached_for=""
 
 log "starting (agent=$AGENT_SO delay=${ATTACH_DELAY_SEC}s poll=${POLL_SEC}s)"
 
+# Remove stale Chromium single-instance locks from a prior TWS run.
+#
+# TWS renders the TradingView chart through JxBrowser (embedded
+# Chromium). When TWS shuts down -- graceful or otherwise -- it
+# sometimes leaves the three Chromium singleton files behind in the
+# persistent user-data directory:
+#   $JTS_ROOT/<user-hash>/tvChartSettings{,_temp}/
+#     SingletonLock    -> <hostname>-<pid>
+#     SingletonCookie  -> <random-id>
+#     SingletonSocket  -> /tmp/.org.chromium.Chromium.<rand>/SingletonSocket
+#
+# On the next start, JxBrowser sees SingletonLock still pointing at
+# a now-dead PID and refuses to start a new engine:
+#   com.teamdev.jxbrowser.engine.UserDataDirectoryAlreadyInUseException:
+#     The user data directory is already in use: .../tvChartSettings_temp
+# That kills the TradingView chart ("Can't create JxBrowser" in the
+# TWS log) -- everything else in TWS keeps working, but the big
+# browser-based chart window stays blank.
+#
+# Fix: when we observe TWS Java gone, before the next start, delete
+# the three singleton files IF their claimed PID is dead. Never
+# touch the rest of tvChartSettings/ -- the Default/ profile holds
+# chart templates, watchlist layout, cookies, etc. and we want all
+# of that preserved across restarts.
+#
+# Safe because the live TWS chromium never uses tvChartSettings/
+# directly -- it always runs against a fresh /tmp/JxBrowser-UserData-<uuid>
+# (verified: --user-data-dir=/tmp/JxBrowser-UserData-* in the
+# chromium cmdline). tvChartSettings is only ever read/written at
+# session boundaries, i.e. when TWS is down. So at the moment we
+# call this function, no chromium process anywhere on this host is
+# holding the lock.
+clean_stale_jxbrowser_locks() {
+    local d lockfile locktarget pid
+    # Find every tvChartSettings* dir under the JTS root. Two layers
+    # deep is enough: <root>/<user-hash>/tvChartSettings{,_temp}
+    # shellcheck disable=SC2044
+    for d in $(find "$JTS_ROOT" -mindepth 2 -maxdepth 3 -type d \
+                   \( -name tvChartSettings -o -name 'tvChartSettings_temp*' \) \
+                   2>/dev/null); do
+        lockfile="$d/SingletonLock"
+        [ -L "$lockfile" ] || continue
+        # Target format: <hostname>-<pid>. The hostname can contain
+        # hyphens (e.g. "a1b2c3d4e5f6") but the last hyphen-separated
+        # field is always the PID. Read the symlink target verbatim --
+        # readlink handles the case where it points nowhere, which is
+        # itself evidence the lock is stale.
+        locktarget="$(readlink "$lockfile" 2>/dev/null || true)"
+        [ -n "$locktarget" ] || {
+            log "cleaning lock in $d (SingletonLock target unreadable)"
+            rm -f "$d/SingletonLock" "$d/SingletonCookie" "$d/SingletonSocket" \
+                2>/dev/null || true
+            continue
+        }
+        pid="${locktarget##*-}"
+        case "$pid" in
+            ''|*[!0-9]*) log "cleaning lock in $d (SingletonLock target='$locktarget' has no numeric pid)"; rm -f "$d/SingletonLock" "$d/SingletonCookie" "$d/SingletonSocket" 2>/dev/null || true; continue;;
+        esac
+        if kill -0 "$pid" 2>/dev/null; then
+            # A live process holds this PID. Could be a coincidental
+            # PID reuse, or could be a real chromium another TWS
+            # instance is using. Either way: do not touch. Log so a
+            # human can investigate if charts are still broken.
+            log "NOT cleaning $d -- SingletonLock target pid $pid is alive"
+            continue
+        fi
+        log "cleaning stale jxbrowser lock in $d (dead pid=$pid)"
+        rm -f "$d/SingletonLock" "$d/SingletonCookie" "$d/SingletonSocket" \
+            2>/dev/null || true
+    done
+}
+
 while true; do
     pid="$(find_tws_pid || true)"
     if [ -n "${pid:-}" ]; then
@@ -120,6 +192,7 @@ while true; do
     else
         if [ -n "$last_pid" ]; then
             log "TWS Java gone (was pid $last_pid); waiting for restart"
+            clean_stale_jxbrowser_locks
         fi
         last_pid=""
         attached_for=""
